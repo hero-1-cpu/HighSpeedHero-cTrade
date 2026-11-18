@@ -1,0 +1,37 @@
+
+name: Build HighSpeedHero cTrader cBot
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Get source code
+        uses: actions/checkout@v4
+
+      - name: Install .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build cBot
+        shell: bash
+        run: |
+          PROJECT=$(find . -name '*.csproj' -not -path '*/obj/*' | head -n 1)
+          if [ -z "$PROJECT" ]; then
+            echo "No C# project found. Add the cBot project first."
+            exit 1
+          fi
+          dotnet build "$PROJECT" --configuration Release
+
+      - name: Upload cTrader algo
+        uses: actions/upload-artifact@v4
+        with:
+          name: HighSpeedHero-algo
+          path: '**/bin/Release/**/*.algo'
+          if-no-files-found: error
