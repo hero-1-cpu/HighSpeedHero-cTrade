@@ -8,7 +8,7 @@ namespace cAlgo.Robots
     [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
     public class HighSpeedHero : Robot
     {
-        // === INPUTS ===
+        // === ORIGINAL INPUTS ===
 
         [Parameter("Base Lot", DefaultValue = 0.01)]
         public double BaseLot { get; set; }
@@ -44,9 +44,9 @@ namespace cAlgo.Robots
         public bool RecoveryOnShift { get; set; }
 
         [Parameter("Magic Number", DefaultValue = 20251013)]
-        public long MagicNumber { get; set; }
+        public int MagicNumber { get; set; }
 
-        [Parameter("Slippage", DefaultValue = 30)]
+        [Parameter("Slippage Points", DefaultValue = 30)]
         public int Slippage { get; set; }
 
         [Parameter("Max Spread Points", DefaultValue = 25)]
@@ -67,50 +67,79 @@ namespace cAlgo.Robots
         [Parameter("Trade Sell", DefaultValue = true)]
         public bool TradeSell { get; set; }
 
-        // === GLOBALS ===
+        // === INTERNAL VARIABLES ===
 
         private Bars _m1Bars;
         private DateTime _lastCloseTime = DateTime.MinValue;
         private string _label;
 
+        private Position[] MyPositions
+        {
+            get
+            {
+                return Positions.FindAll(_label, SymbolName);
+            }
+        }
+
+        // === START ===
+
         protected override void OnStart()
         {
             _label = "HS-Hero-" + MagicNumber;
+
             _m1Bars = MarketData.GetBars(TimeFrame.Minute);
 
-            Print("HighSpeed Hero v1.50");
-            Print("SideTP=${0} | Recovery x{1} | Cooldown={2}s",
-                SideTP_USD, RecoveryMultiplier, CooldownSeconds);
+            Print("HighSpeed Hero v1.50 started.");
+            Print("Side TP = {0}", SideTP_USD);
+            Print("Recovery multiplier = {0}", RecoveryMultiplier);
+            Print("Cooldown = {0} seconds", CooldownSeconds);
+            Print("Symbol = {0}", SymbolName);
+            Print("WARNING: DEMO TESTING ONLY.");
         }
+
+        // === TICK ===
 
         protected override void OnTick()
         {
-            double spreadPoints = Symbol.Spread / Symbol.TickSize;
+            if (!Account.IsLive && !Account.IsDemo)
+                return;
+
+            double spreadPoints = (Symbol.Ask - Symbol.Bid) / Symbol.TickSize;
 
             if (spreadPoints > MaxSpreadPoints)
                 return;
 
-            // 1. Manage each side independently
+            // 1. Manage BUY and SELL sides independently
             ManageSides();
 
-            // 2. Hard limit
+            // 2. Maximum total positions
             if (CountMyPositions() >= MaxOpenTrades)
                 return;
 
-            // 3. Cooldown after profit take
+            // 3. Cooldown after side profit close
             if (_lastCloseTime != DateTime.MinValue)
             {
                 double elapsed = (Server.Time - _lastCloseTime).TotalSeconds;
 
                 if (elapsed < CooldownSeconds)
                 {
-                    Print("Cooldown active... {0}s left",
-                        CooldownSeconds - (int)elapsed);
+                    double remaining = CooldownSeconds - elapsed;
+
+                    Chart.DrawStaticText(
+                        "HS_COOLDOWN",
+                        "COOLDOWN: " + remaining.ToString("F0") + "s",
+                        VerticalAlignment.Top,
+                        HorizontalAlignment.Left,
+                        Color.Yellow
+                    );
+
                     return;
                 }
             }
 
-            // 4. Velocity entry
+            Chart.RemoveObject("HS_COOLDOWN");
+
+            // 4. M1 velocity entry
             CheckVelocityEntry();
         }
 
@@ -118,15 +147,16 @@ namespace cAlgo.Robots
 
         private void ManageSides()
         {
-            double buyProfit = 0.0;
-            double sellProfit = 0.0;
+            double buyProfit = 0;
+            double sellProfit = 0;
             int buyCount = 0;
             int sellCount = 0;
-            double totalProfit = 0.0;
+            double totalProfit = 0;
 
-            foreach (var position in GetMyPositions())
+            foreach (Position position in MyPositions)
             {
                 double profit = position.GrossProfit + position.Swap;
+
                 totalProfit += profit;
 
                 if (position.TradeType == TradeType.Buy)
@@ -141,68 +171,74 @@ namespace cAlgo.Robots
                 }
             }
 
-            // Close BUY side on good profit
+            // Close BUY side when target is reached
             if (buyCount > 0 && buyProfit >= SideTP_USD)
             {
-                CloseSide(TradeType.Buy,
-                    "BUY side TP $" + SideTP_USD.ToString("F2"));
-
+                CloseSide(TradeType.Buy, "BUY side TP");
                 _lastCloseTime = Server.Time;
             }
 
-            // Close SELL side on good profit
+            // Close SELL side when target is reached
             if (sellCount > 0 && sellProfit >= SideTP_USD)
             {
-                CloseSide(TradeType.Sell,
-                    "SELL side TP $" + SideTP_USD.ToString("F2"));
-
+                CloseSide(TradeType.Sell, "SELL side TP");
                 _lastCloseTime = Server.Time;
             }
 
-            // Emergency full close
+            // Emergency full close in account currency
             if (MaxDD_USD > 0 && totalProfit <= -MaxDD_USD)
             {
-                CloseAllPositions("Max DD $ hit");
+                CloseAllPositions("Max DD USD hit");
                 return;
             }
 
             if (MaxDD_Percent > 0 && Account.Balance > 0)
             {
-                double ddPct =
-                    -totalProfit / Account.Balance * 100.0;
+                double ddPercent = -totalProfit / Account.Balance * 100.0;
 
-                if (ddPct >= MaxDD_Percent)
+                if (ddPercent >= MaxDD_Percent)
                 {
-                    CloseAllPositions("Max DD % hit");
+                    CloseAllPositions("Max DD percent hit");
                     return;
                 }
             }
 
-            string cooldownTxt = "";
+            string cooldownText = "";
 
             if (_lastCloseTime != DateTime.MinValue)
             {
-                double elapsed =
-                    (Server.Time - _lastCloseTime).TotalSeconds;
+                double elapsed = (Server.Time - _lastCloseTime).TotalSeconds;
 
                 if (elapsed < CooldownSeconds)
                 {
-                    cooldownTxt = " | COOLDOWN " +
-                        (CooldownSeconds - (int)elapsed) + "s";
+                    cooldownText = " | COOLDOWN " +
+                        (CooldownSeconds - elapsed).ToString("F0") + "s";
                 }
             }
 
-            Print("BUY: ${0:F2} ({1}) | SELL: ${2:F2} ({3}) | Target: ${4:F2}{5}",
-                buyProfit, buyCount,
-                sellProfit, sellCount,
-                SideTP_USD, cooldownTxt);
+            string status =
+                "HIGH SPEED HERO v1.50\n" +
+                "BUY: " + buyProfit.ToString("F2") +
+                " (" + buyCount + ")\n" +
+                "SELL: " + sellProfit.ToString("F2") +
+                " (" + sellCount + ")\n" +
+                "TARGET: " + SideTP_USD.ToString("F2") +
+                cooldownText;
+
+            Chart.DrawStaticText(
+                "HS_STATUS",
+                status,
+                VerticalAlignment.Top,
+                HorizontalAlignment.Left,
+                Color.White
+            );
         }
 
         // === CLOSE ONE SIDE ===
 
         private void CloseSide(TradeType side, string reason)
         {
-            foreach (var position in GetMyPositions())
+            foreach (Position position in MyPositions)
             {
                 if (position.TradeType != side)
                     continue;
@@ -211,53 +247,56 @@ namespace cAlgo.Robots
 
                 if (!result.IsSuccessful)
                 {
-                    Print("Close failed #{0} Error={1}",
+                    Print("Close failed #{0}: {1}",
                         position.Id, result.Error);
                 }
             }
 
-            Print("Closed {0} -> {1}", side, reason);
+            Print("Closed {0} side: {1}", side, reason);
         }
 
         // === CLOSE ALL ===
 
         private void CloseAllPositions(string reason)
         {
-            foreach (var position in GetMyPositions())
+            foreach (Position position in MyPositions)
             {
                 TradeResult result = ClosePosition(position);
 
                 if (!result.IsSuccessful)
                 {
-                    Print("Close failed #{0} Error={1}",
+                    Print("Close failed #{0}: {1}",
                         position.Id, result.Error);
                 }
             }
 
-            Print("All positions closed -> {0}", reason);
+            Print("All positions close requested: {0}", reason);
         }
 
         // === VELOCITY ENTRY ===
 
         private void CheckVelocityEntry()
         {
+            if (_m1Bars == null || _m1Bars.Count < 2)
+                return;
+
             int shift = UseCurrentCandle ? 0 : 1;
             int index = _m1Bars.Count - 1 - shift;
 
             if (index < 0)
                 return;
 
-            double open = _m1Bars.OpenPrices[index];
-            double close = _m1Bars.ClosePrices[index];
+            double candleOpen = _m1Bars.OpenPrices[index];
+            double candleClose = _m1Bars.ClosePrices[index];
 
             double bodyPips =
-                Math.Abs(close - open) / Symbol.PipSize;
+                Math.Abs(candleClose - candleOpen) / Symbol.PipSize;
 
             if (bodyPips < VelocityPips)
                 return;
 
-            bool bullish = close > open;
-            bool bearish = close < open;
+            bool bullish = candleClose > candleOpen;
+            bool bearish = candleClose < candleOpen;
 
             if (bullish && TradeBuy)
             {
@@ -275,27 +314,26 @@ namespace cAlgo.Robots
             }
         }
 
-        // === STRONG RECOVERY MARTINGALE ===
+        // === MARTINGALE + STRONG RECOVERY ===
 
         private double CalculateLot(TradeType type)
         {
             double lot = BaseLot;
 
             int sameDirCount = 0;
-            double sameDirProfit = 0.0;
+            double sameDirProfit = 0;
 
             int oppositeCount = 0;
-            double oppositeProfit = 0.0;
+            double oppositeProfit = 0;
 
             TradeType oppositeType =
                 type == TradeType.Buy
                     ? TradeType.Sell
                     : TradeType.Buy;
 
-            foreach (var position in GetMyPositions())
+            foreach (Position position in MyPositions)
             {
-                double profit =
-                    position.GrossProfit + position.Swap;
+                double profit = position.GrossProfit + position.Swap;
 
                 if (position.TradeType == type)
                 {
@@ -323,8 +361,7 @@ namespace cAlgo.Robots
                     shouldIncrease = true;
 
                 if (shouldIncrease)
-                    level = Math.Min(
-                        sameDirCount, MaxMartingaleLevels);
+                    level = Math.Min(sameDirCount, MaxMartingaleLevels);
             }
 
             // 2. Strong recovery on direction shift
@@ -336,81 +373,63 @@ namespace cAlgo.Robots
             {
                 isRecovery = true;
 
-                int recoveryLevel = Math.Min(
-                    oppositeCount + 1,
-                    MaxMartingaleLevels);
+                int recoveryLevel =
+                    Math.Min(oppositeCount + 1, MaxMartingaleLevels);
 
                 level = Math.Max(level, recoveryLevel);
             }
 
             if (level > 0)
             {
-                lot = BaseLot *
-                    Math.Pow(LotMultiplier, level);
+                lot = BaseLot * Math.Pow(LotMultiplier, level);
             }
 
             // Extra recovery multiplier
             if (isRecovery)
+            {
                 lot *= RecoveryMultiplier;
-
-            // Broker volume limits, converted to lots
-            double unitsPerLot =
-                Symbol.QuantityToVolumeInUnits(1.0);
-
-            double minLot =
-                Symbol.VolumeInUnitsMin / unitsPerLot;
-
-            double maxLot =
-                Symbol.VolumeInUnitsMax / unitsPerLot;
-
-            double lotStep =
-                Symbol.VolumeInUnitsStep / unitsPerLot;
-
-            lot = Math.Max(minLot, Math.Min(maxLot, lot));
-
-            lot = Math.Round(
-                Math.Floor(lot / lotStep) * lotStep, 2);
+            }
 
             // Convert lots into cTrader volume units
-            double volume =
-                Symbol.QuantityToVolumeInUnits(lot);
+            double volume = Symbol.QuantityToVolumeInUnits(lot);
+
+            // Broker volume limits
+            volume = Math.Max(Symbol.VolumeInUnitsMin,
+                Math.Min(Symbol.VolumeInUnitsMax, volume));
 
             volume = Symbol.NormalizeVolumeInUnits(
-                volume, RoundingMode.Down);
+                volume,
+                RoundingMode.Down
+            );
 
             // Margin check
-            double margin =
+            double requiredMargin =
                 Symbol.GetEstimatedMargin(type, volume);
 
-            if (margin > Account.FreeMargin)
+            if (requiredMargin > Account.FreeMargin)
             {
-                Print("Not enough margin for lot {0}", lot);
+                Print("Not enough margin. Required: {0}",
+                    requiredMargin);
+
                 return 0;
             }
 
-            return lot;
+            return volume;
         }
 
         // === OPEN POSITION ===
 
-        private void OpenPosition(TradeType type, double lot)
+        private void OpenPosition(TradeType type, double volume)
         {
-            double volume =
-                Symbol.QuantityToVolumeInUnits(lot);
-
-            volume = Symbol.NormalizeVolumeInUnits(
-                volume, RoundingMode.Down);
-
-            double marketRangePips =
-                Slippage * Symbol.TickSize / Symbol.PipSize;
-
             double basePrice =
                 type == TradeType.Buy
                     ? Symbol.Ask
                     : Symbol.Bid;
 
-            // No individual stop loss or take profit,
-            // matching the original MQL5 OpenPosition call.
+            // Convert original slippage points into pips
+            double marketRangePips =
+                Slippage * Symbol.TickSize / Symbol.PipSize;
+
             TradeResult result = ExecuteMarketRangeOrder(
                 type,
                 SymbolName,
@@ -418,20 +437,20 @@ namespace cAlgo.Robots
                 marketRangePips,
                 basePrice,
                 _label,
-                null,
-                null,
+                (double?)null,
+                (double?)null,
                 "HS-Hero"
             );
 
             if (!result.IsSuccessful)
             {
-                Print("Open failed. Error={0} Lot={1}",
-                    result.Error, lot);
+                Print("Open failed: {0}. Volume: {1}",
+                    result.Error, volume);
             }
             else
             {
-                Print("Opened {0} lot={1}",
-                    type, lot);
+                Print("Opened {0}. Volume units: {1}",
+                    type, volume);
             }
         }
 
@@ -439,14 +458,7 @@ namespace cAlgo.Robots
 
         private int CountMyPositions()
         {
-            return GetMyPositions().Length;
-        }
-
-        // === GET THIS BOT'S POSITIONS ===
-
-        private Position[] GetMyPositions()
-        {
-            return Positions.FindAll(_label, SymbolName);
+            return MyPositions.Length;
         }
     }
 }
